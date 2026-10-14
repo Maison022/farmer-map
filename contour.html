@@ -44,13 +44,13 @@
 </div>
 <script>
 const L10N = {
-  uk: { hint: "Торкайтеся кутів поля по черзі. Перший кут — щоб замкнути.", closed: "Контур готовий. Перетягніть точки, щоб поправити.",
+  uk: { hint: "Торкайтеся кутів поля по черзі. Перший кут — щоб замкнути.", closed: "Тягніть точки. Жовті кружечки посередині — додати точку. Тап по точці — видалити.",
         undo: "↶ Крок назад", clear: "Очистити", save: "Зберегти", area: "Площа", ha: "га", few: "Потрібно щонайменше 3 точки",
         big: "Забагато точок — спростив контур", badfile: "Не вдалося прочитати файл" },
-  ru: { hint: "Касайтесь углов поля по очереди. Первый угол — чтобы замкнуть.", closed: "Контур готов. Перетащите точки, чтобы поправить.",
+  ru: { hint: "Касайтесь углов поля по очереди. Первый угол — чтобы замкнуть.", closed: "Тяните точки. Жёлтые кружки посередине — добавить точку. Тап по точке — удалить.",
         undo: "↶ Шаг назад", clear: "Очистить", save: "Сохранить", area: "Площадь", ha: "га", few: "Нужно минимум 3 точки",
         big: "Слишком много точек — упростил контур", badfile: "Не удалось прочитать файл" },
-  en: { hint: "Tap the field corners one by one. Tap the first corner to close.", closed: "Boundary ready. Drag points to adjust.",
+  en: { hint: "Tap the field corners one by one. Tap the first corner to close.", closed: "Drag points. Yellow dots in the middle add a point. Tap a point to delete it.",
         undo: "↶ Undo", clear: "Clear", save: "Save", area: "Area", ha: "ha", few: "At least 3 points needed",
         big: "Too many points — boundary simplified", badfile: "Couldn't read the file" },
 };
@@ -82,9 +82,24 @@ function draw() {
     const m = L.marker(p, { draggable: true, icon: L.divIcon({ className: "", iconSize: [18, 18],
       html: `<div style="width:18px;height:18px;border-radius:50%;background:${i === 0 ? "#2e6b30" : "#fff"};border:3px solid #ffd400;box-sizing:border-box"></div>` }) });
     m.on("drag", e => { points[i] = [e.latlng.lat, e.latlng.lng]; shape && shape.setLatLngs(points); showArea(); });
-    m.on("click", () => { if (i === 0 && points.length >= 3 && !closed) { closed = true; draw(); } });
+    m.on("dragend", draw);
+    m.on("click", () => {
+      if (!closed) { if (i === 0 && points.length >= 3) { closed = true; draw(); } }
+      else if (points.length > 3) { points.splice(i, 1); draw(); }  // тап по точке готового контура — удалить
+    });
     m.addTo(map); markers.push(m);
   });
+  if (closed) {  // полупрозрачные точки посередине сторон: потянуть или тапнуть — добавить точку
+    points.forEach((p, i) => {
+      const q = points[(i + 1) % points.length];
+      const mid = L.marker([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2], { draggable: true, icon: L.divIcon({ className: "",
+        iconSize: [16, 16], html: '<div style="width:16px;height:16px;border-radius:50%;background:rgba(255,212,0,.55);border:2px solid #fff;box-sizing:border-box"></div>' }) });
+      const insert = latlng => { points.splice(i + 1, 0, [latlng.lat, latlng.lng]); draw(); };
+      mid.on("click", e => insert(e.target.getLatLng()));
+      mid.on("dragend", e => insert(e.target.getLatLng()));
+      mid.addTo(map); markers.push(mid);
+    });
+  }
   document.getElementById("hint").textContent = closed ? T.closed : T.hint;
   showArea();
 }
