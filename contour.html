@@ -118,8 +118,25 @@ function showArea() {
 map.on("click", e => { if (!closed) { points.push([e.latlng.lat, e.latlng.lng]); draw(); } });
 document.getElementById("undo").onclick = () => { if (closed) closed = false; else points.pop(); draw(); };
 document.getElementById("clear").onclick = () => { points = []; closed = false; draw(); };
-document.getElementById("locate").onclick = () => navigator.geolocation && navigator.geolocation.getCurrentPosition(
-  pos => map.setView([pos.coords.latitude, pos.coords.longitude], 16), () => {}, { enableHighAccuracy: true });
+let me = null;
+function locate() {
+  const show = (lat, lon) => {
+    map.setView([lat, lon], 16);
+    if (me) map.removeLayer(me);
+    me = L.circleMarker([lat, lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#1a73e8", fillOpacity: 1 }).addTo(map);
+  };
+  const lm = tg && tg.LocationManager;
+  if (lm && tg.isVersionAtLeast && tg.isVersionAtLeast("8.0")) {  // геолокация Telegram (спрашивает разрешение сама)
+    lm.init(() => lm.isLocationAvailable
+      ? lm.getLocation(loc => loc ? show(loc.latitude, loc.longitude) : browserLocate(show))
+      : browserLocate(show));
+  } else browserLocate(show);
+}
+function browserLocate(show) {
+  navigator.geolocation && navigator.geolocation.getCurrentPosition(
+    pos => show(pos.coords.latitude, pos.coords.longitude), () => {}, { enableHighAccuracy: true, timeout: 15000 });
+}
+document.getElementById("locate").onclick = locate;
 
 document.getElementById("save").onclick = () => {
   if (points.length < 3) { alert(T.few); return; }
@@ -155,6 +172,8 @@ if (params.get("g")) {
   points = params.get("g").split(";").map(s => s.split(",").map(Number)).map(c => [c[1], c[0]]);
   closed = true;
   map.fitBounds(L.polygon(points).getBounds(), { padding: [20, 20] });
+} else if (!params.get("c")) {
+  locate();  // контура нет и других полей нет — сразу показываем, где клиент сейчас
 }
 draw();
 </script>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Контур поля</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+<style>
+  :root { --bg: #ffffff; --fg: #1d1d1f; --accent: #2e6b30; --muted: #6b6b6b; --line: #ffd400; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+               font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0 0 112px 0; }
+  #panel { position: absolute; left: 0; right: 0; bottom: 0; height: 112px; box-sizing: border-box;
+           padding: 10px 16px; background: var(--bg); border-top: 1px solid #ddd; }
+  #hint { font-size: 14px; color: var(--muted); min-height: 20px; }
+  #area { font-size: 18px; font-weight: 600; margin: 4px 0 8px; }
+  .row { display: flex; gap: 8px; }
+  button { flex: 1; border: 0; border-radius: 10px; padding: 11px 6px; font-size: 15px;
+           background: #eef3ee; color: var(--fg); }
+  button.main { background: var(--accent); color: #fff; }
+  #locate { position: absolute; right: 12px; top: 12px; z-index: 1000; flex: none; width: 44px; height: 44px;
+            padding: 0; font-size: 20px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+  label.file { position: absolute; right: 12px; top: 64px; z-index: 1000; width: 44px; height: 44px;
+               border-radius: 10px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+               display: flex; align-items: center; justify-content: center; font-size: 20px; }
+  label.file input { display: none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<button id="locate" title="GPS">📍</button>
+<label class="file" title="KML / GeoJSON">📂<input id="file" type="file" accept=".kml,.geojson,.json"></label>
+<div id="panel">
+  <div id="hint"></div>
+  <div id="area"></div>
+  <div class="row">
+    <button id="undo"></button>
+    <button id="clear"></button>
+    <button id="save" class="main"></button>
+  </div>
+</div>
+<script>
+const L10N = {
+  uk: { hint: "Торкайтеся кутів поля по черзі. Перший кут — щоб замкнути.", closed: "Тягніть точки. Зелений «+» посередині — додати точку. Тап по точці — видалити.",
+        undo: "↶ Крок назад", clear: "Очистити", save: "Зберегти", area: "Площа", ha: "га", few: "Потрібно щонайменше 3 точки",
+        big: "Забагато точок — спростив контур", badfile: "Не вдалося прочитати файл" },
+  ru: { hint: "Касайтесь углов поля по очереди. Первый угол — чтобы замкнуть.", closed: "Тяните точки. Зелёный «+» посередине — добавить точку. Тап по точке — удалить.",
+        undo: "↶ Шаг назад", clear: "Очистить", save: "Сохранить", area: "Площадь", ha: "га", few: "Нужно минимум 3 точки",
+        big: "Слишком много точек — упростил контур", badfile: "Не удалось прочитать файл" },
+  en: { hint: "Tap the field corners one by one. Tap the first corner to close.", closed: "Drag points. Green \u0022+\u0022 in the middle adds a point. Tap a point to delete it.",
+        undo: "↶ Undo", clear: "Clear", save: "Save", area: "Area", ha: "ha", few: "At least 3 points needed",
+        big: "Too many points — boundary simplified", badfile: "Couldn't read the file" },
+};
+const params = new URLSearchParams(location.search);
+const T = L10N[params.get("lang")] || L10N.uk;
+const fieldId = params.get("field");
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+document.getElementById("undo").textContent = T.undo;
+document.getElementById("clear").textContent = T.clear;
+document.getElementById("save").textContent = T.save;
+
+const center = (params.get("c") || "49.5,32.5").split(",").map(Number);
+const map = L.map("map", { zoomControl: false }).setView(center, params.get("c") ? 14 : 6);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            { maxZoom: 19, attribution: "Esri World Imagery" }).addTo(map);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+            { maxZoom: 19, opacity: 0.8 }).addTo(map);
+
+let points = [], closed = false, markers = [], shape = null;
+
+function draw() {
+  markers.forEach(m => map.removeLayer(m)); markers = [];
+  if (shape) map.removeLayer(shape);
+  shape = points.length ? (closed ? L.polygon(points, { color: "#ffd400", weight: 3, fillOpacity: 0.15 })
+                                  : L.polyline(points, { color: "#ffd400", weight: 3, dashArray: "6 6" })).addTo(map) : null;
+  points.forEach((p, i) => {
+    const m = L.marker(p, { draggable: true, icon: L.divIcon({ className: "", iconSize: [18, 18],
+      html: `<div style="width:18px;height:18px;border-radius:50%;background:${i === 0 ? "#2e6b30" : "#fff"};border:3px solid #ffd400;box-sizing:border-box"></div>` }) });
+    m.on("drag", e => { points[i] = [e.latlng.lat, e.latlng.lng]; shape && shape.setLatLngs(points); showArea(); });
+    m.on("dragend", draw);
+    m.on("click", () => {
+      if (!closed) { if (i === 0 && points.length >= 3) { closed = true; draw(); } }
+      else if (points.length > 3) { points.splice(i, 1); draw(); }  // тап по точке готового контура — удалить
+    });
+    m.addTo(map); markers.push(m);
+  });
+  if (closed) {  // полупрозрачные точки посередине сторон: потянуть или тапнуть — добавить точку
+    points.forEach((p, i) => {
+      const q = points[(i + 1) % points.length];
+      const mid = L.marker([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2], { draggable: true, icon: L.divIcon({ className: "",
+        iconSize: [26, 26], html: '<div style="width:26px;height:26px;border-radius:50%;background:#2e6b30;border:2px solid #fff;box-sizing:border-box;color:#fff;font:bold 20px/22px sans-serif;text-align:center">+</div>' }) });
+      const insert = latlng => { points.splice(i + 1, 0, [latlng.lat, latlng.lng]); draw(); };
+      mid.on("click", e => insert(e.target.getLatLng()));
+      mid.on("dragend", e => insert(e.target.getLatLng()));
+      mid.addTo(map); markers.push(mid);
+    });
+  }
+  document.getElementById("hint").textContent = closed ? T.closed : T.hint;
+  showArea();
+}
+
+function polygonGeo() {
+  const ring = points.map(p => [+p[1].toFixed(6), +p[0].toFixed(6)]);
+  ring.push(ring[0]);
+  return turf.polygon([ring]);
+}
+
+function showArea() {
+  const el = document.getElementById("area");
+  el.textContent = points.length >= 3 ? `${T.area}: ${(turf.area(polygonGeo()) / 10000).toFixed(1)} ${T.ha}` : "";
+}
+
+map.on("click", e => { if (!closed) { points.push([e.latlng.lat, e.latlng.lng]); draw(); } });
+document.getElementById("undo").onclick = () => { if (closed) closed = false; else points.pop(); draw(); };
+document.getElementById("clear").onclick = () => { points = []; closed = false; draw(); };
+let me = null;
+function locate() {
+  const show = (lat, lon) => {
+    map.setView([lat, lon], 16);
+    if (me) map.removeLayer(me);
+    me = L.circleMarker([lat, lon], { radius: 8, color: "#fff", weight: 3, fillColor: "#1a73e8", fillOpacity: 1 }).addTo(map);
+  };
+  const lm = tg && tg.LocationManager;
+  if (lm && tg.isVersionAtLeast && tg.isVersionAtLeast("8.0")) {  // геолокация Telegram (спрашивает разрешение сама)
+    lm.init(() => lm.isLocationAvailable
+      ? lm.getLocation(loc => loc ? show(loc.latitude, loc.longitude) : browserLocate(show))
+      : browserLocate(show));
+  } else browserLocate(show);
+}
+function browserLocate(show) {
+  navigator.geolocation && navigator.geolocation.getCurrentPosition(
+    pos => show(pos.coords.latitude, pos.coords.longitude), () => {}, { enableHighAccuracy: true, timeout: 15000 });
+}
+document.getElementById("locate").onclick = locate;
+
+document.getElementById("save").onclick = () => {
+  if (points.length < 3) { alert(T.few); return; }
+  let geo = polygonGeo(), tolerance = 0.000005;
+  let payload = () => JSON.stringify({ field: fieldId, coords: geo.geometry.coordinates[0],
+                                       area_ha: +(turf.area(geo) / 10000).toFixed(2) });
+  while (payload().length > 4000) {  // sendData принимает до 4096 байт
+    geo = turf.simplify(geo, { tolerance, highQuality: true }); tolerance *= 2;
+  }
+  if (tg && tg.sendData) tg.sendData(payload()); else alert(payload());
+};
+
+// загрузка готового контура: KML (Google Earth) или GeoJSON
+document.getElementById("file").onchange = async e => {
+  try {
+    const text = await e.target.files[0].text();
+    let ring;
+    if (text.trim().startsWith("<")) {
+      const coords = new DOMParser().parseFromString(text, "text/xml").getElementsByTagName("coordinates")[0].textContent;
+      ring = coords.trim().split(/\s+/).map(s => s.split(",").map(Number));
+    } else {
+      const g = JSON.parse(text);
+      const geom = g.type === "FeatureCollection" ? g.features[0].geometry : g.type === "Feature" ? g.geometry : g;
+      ring = geom.type === "MultiPolygon" ? geom.coordinates[0][0] : geom.coordinates[0];
+    }
+    points = ring.slice(0, -1).map(c => [c[1], c[0]]); closed = true; draw();
+    map.fitBounds(L.polygon(points).getBounds(), { padding: [20, 20] });
+  } catch (err) { alert(T.badfile); }
+};
+
+// контур, который уже есть у поля: ?g=lon,lat;lon,lat;...
+if (params.get("g")) {
+  points = params.get("g").split(";").map(s => s.split(",").map(Number)).map(c => [c[1], c[0]]);
+  closed = true;
+  map.fitBounds(L.polygon(points).getBounds(), { padding: [20, 20] });
+} else if (!params.get("c")) {
+  locate();  // контура нет и других полей нет — сразу показываем, где клиент сейчас
+}
+draw();
+</script>
+</body>
+</html>
